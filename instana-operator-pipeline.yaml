@@ -12,7 +12,7 @@ spec:
       default: "instana-operator"
     - name: storage-class
       type: string
-      description: RWX storage class needed for cp4d
+      description: RWX storage class
       default: "ocs-storagecluster-cephfs"
       type: string
       description: Cloud Pak for Data version
