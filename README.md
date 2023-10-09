@@ -15,10 +15,8 @@ A `deployer` cluster is configured with the following items:
 - ConfigMap named pipeline-output in the "default" namespace
 - OpenShift Data Foundation
 
-There is also the option to use your own IBM Entitlement key passed in as the parameter ibm-entitlement-key
-
 ## Deployment Scripts
 
 `oc apply -f instana-operator-pipeline.yaml` to install the pipeline.
 
-`oc create -f instana-operator-pipeline-run.yaml` to kick off pipeline.
+`oc create -f instana-operator-pipeline-run.yaml` to kick off pipeline, note that it is missing required parameters and you will need to provide values for agent-key, sales-key, user-valid-email, and instana-password.

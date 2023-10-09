@@ -7,11 +7,17 @@ spec:
   pipelineRef:
     name: instana-operator
   params:
+    # - name: instana-password
+    #   value: "fakepassword"
+    # - name: user-valid-email
+    #   value: "valid-email"
     - name: namespace
       value: "instana-operator"
     - name: storage-class
       value: "ocs-storagecluster-cephfs"
     - name: ocp-client-version
       value: "4.12"
-    - name: agent-key
-      value: "false"
+    # - name: agent-key
+    #   value: "valid-agent-key"
+    # - name: sales-key
+    #   value: "valid-sales-key"

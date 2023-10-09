@@ -6,6 +6,12 @@ metadata:
   annotations:
 spec:
   params:
+    - name: user-valid-email
+      type: string
+      description: An accessible email for the configuration of Instana's initial admin user
+    - name: instana-password
+      type: string
+      description: Password for instana tenant unit with admin role
     - name: namespace
       type: string
       description: Namespace where Instana operator will be installed
@@ -14,48 +20,52 @@ spec:
       type: string
       description: RWX storage class
       default: "ocs-storagecluster-cephfs"
-      type: string
-      description: Cloud Pak for Data version
-      default: "4.7.1"
     - name: agent-key
       type: string
       description: The Instana agent key with permissions for pulling Instana images
+      default: "false"
+    - name: sales-key
+      type: string
+      description: The Instana sales key
       default: "false"
     - name: agent-key-secret-name
       type: string
       description: The name of the secret storing the Instana agent key
       default: "instana-agent-key"
-  # finally:
-  #   - name: update-configmap-failure
-  #     when:
-  #       - input: $(tasks.run-the-deployer.status)
-  #         operator: notin
-  #         values: ["Succeeded"]
-  #     taskRef:
-  #       kind: Task
-  #       name: ibm-pak
-  #     params:
-  #       - name: SCRIPT
-  #         value: |
-  #           oc patch configmap/pipeline-output -p '{"data":{"Status":"Pipeline run failed. See Pipeline run for more details and consider running the pipeline again."}}'
-  #   - name: update-configmap-success
-  #     when:
-  #       - input: $(tasks.run-the-deployer.status)
-  #         operator: in
-  #         values: ["Succeeded"]
-  #     taskRef:
-  #       kind: Task
-  #       name: ibm-pak
-  #     params:
-  #       - name: SCRIPT
-  #         value: |
-  #           cpd_route=$(oc get route cpd -n cpd --template='{{ .spec.host }}')
-  #           echo "Console Route: $cpd_route"
-  #           initial_admin_password=$(oc get secret admin-user-details -n cpd -o jsonpath='{.data.initial_admin_password}' | base64 -d)
-  #           echo "Username: admin"
-  #           echo "Password: $initial_admin_password"
+    - name: crypto-seed
+      type: string
+      description: Seed for creating crypto tokens. Pick a random 12 char string
+      default: "tzinstana"
+  finally:
+    - name: update-configmap-failure
+      when:
+        - input: $(tasks.create-routes.status)
+          operator: notin
+          values: ["Succeeded"]
+      taskRef:
+        kind: Task
+        name: ibm-pak
+      params:
+        - name: SCRIPT
+          value: |
+            oc patch configmap/pipeline-output -p '{"data":{"Status":"Pipeline run failed. See Pipeline run for more details and consider running the pipeline again."}}'
+    - name: update-configmap-success
+      when:
+        - input: $(tasks.create-routes.status)
+          operator: in
+          values: ["Succeeded"]
+      taskRef:
+        kind: Task
+        name: ibm-pak
+      params:
+        - name: SCRIPT
+          value: |
+            instana_route=$(oc get route unit0-tenant0-ui -n instana-core --template='{{ .spec.host }}')
+            echo "Console Route: $instana_route"
+            echo "Username: $params.user-valid-email"
+            echo "Password: $params.instana-password"
 
-  #           oc patch configmap/pipeline-output -p "{\"data\":{\"Status\":\"Pipeline run Successful\",\"CP4D-Console-Route\":\"${cpd_route}\",\"CP4D-Initial-Admin-Username\":\"admin\",\"CP4D-Initial-Admin-Password\":\"${initial_admin_password}\"}}"
+            oc patch configmap/pipeline-output -p "{\"data\":{\"Status\":\"Pipeline run Successful\",\"Instana-Console-Route\":\"${instana_route}\",\"Instana-Initial-Admin-Username\":\"$(params.user-valid-email)\",\"Instana-Initial-Admin-Password\":\"$(params.instana-password)\"}}"
   tasks:
     - name: add-namespace
       retries: 3
@@ -110,433 +120,868 @@ spec:
         - name: SCRIPT
           value: |
             oc create namespace cert-manager            
-            oc apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.12.2/cert-manager.yaml    
-    - name: install-instana
+            oc apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.12.2/cert-manager.yaml
+    - name: install-instana-operator-and-datastores
       taskSpec:
         params:
-        - name: agent-key
-          type: string
-          default: $(params.agent-key)
-        - name: namespace
-          type: string
-          default: $(params.namespace)
-        - name: agent-key-secret-name
-          type: string
-          default: $(params.agent-key-secret-name)
+          - name: agent-key
+            type: string
+            default: $(params.agent-key)
+          - name: namespace
+            type: string
+            default: $(params.namespace)
+          - name: agent-key-secret-name
+            type: string
+            default: $(params.agent-key-secret-name)
+        results:
+          - name: clickhouse-password
+            description: The clickhouse password
+            type: string
+          - name: kafka-password
+            description: The kafka password
+            type: string
+          - name: elasticsearch-password
+            description: The elasticsearch password
+            type: string
+          - name: postgres-password
+            description: The postgres password
+            type: string
+          - name: cassandra-password
+            description: The cassandra password
+            type: string
         steps:
-        - image: registry.access.redhat.com/ubi8/ubi
-          script: |
-            cat << EOF > /etc/yum.repos.d/Instana-Product.repo
-            [instana-product]
-            name=Instana-Product
-            baseurl=https://_:$(params.agent-key)@artifact-public.instana.io/artifactory/rel-rpm-public-virtual/
-            enabled=1
-            gpgcheck=0
-            gpgkey=https://_:$(params.agent-key)@artifact-public.instana.io/artifactory/api/security/keypair/public/repositories/rel-rpm-public-virtual
-            repo_gpgcheck=1
-            EOF
+          - image: registry.access.redhat.com/ubi8/ubi
+            script: |
+              export VERIFY_CHECKSUM=false
 
-            yum clean expire-cache -y
-            yum update -y
-            yum install -y instana-kubectl
+              cat << EOF > /etc/yum.repos.d/Instana-Product.repo
+              [instana-product]
+              name=Instana-Product
+              baseurl=https://_:$(params.agent-key)@artifact-public.instana.io/artifactory/rel-rpm-public-virtual/
+              enabled=1
+              gpgcheck=0
+              gpgkey=https://_:$(params.agent-key)@artifact-public.instana.io/artifactory/api/security/keypair/public/repositories/rel-rpm-public-virtual
+              repo_gpgcheck=1
+              EOF
 
-            kubectl-instana --version
+              cat <<EOF > /etc/yum.repos.d/kubernetes.repo
+              [kubernetes]
+              name=Kubernetes
+              baseurl=https://pkgs.k8s.io/core:/stable:/v1.28/rpm/
+              enabled=1
+              gpgcheck=1
+              gpgkey=https://pkgs.k8s.io/core:/stable:/v1.28/rpm/repodata/repomd.xml.key
+              EOF
 
-            cat <<EOT >> /tmp/values.yaml
-            imagePullSecrets:
-              - name: $(params.agent-key-secret-name)
-            EOT
+              yum clean expire-cache -y
+              yum update -y
+              yum install -y kubectl instana-kubectl
 
-            kubectl-instana operator apply --namespace=$(params.namespace) --values /tmp/values.yaml
+              kubectl-instana --version
 
-            kubectl-instana operator apply --namespace=$(params.namespace)
+              cat <<EOT >> /tmp/values.yaml
+              imagePullSecrets:
+                - name: $(params.agent-key-secret-name)
+              EOT
 
-            ls -a /tmp
+              kubectl-instana operator apply --namespace=$(params.namespace) --values /tmp/values.yaml
+
+              kubectl-instana operator apply --namespace=$(params.namespace)
+
+              ls -a /tmp
+
+              curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/master/scripts/get-helm-3
+              chmod 700 get_helm.sh
+              ./get_helm.sh
+
+              helm repo add pravega https://charts.pravega.io
+              helm repo update
+              helm upgrade --install instana -n instana-zookeeper --create-namespace pravega/zookeeper-operator --version=0.2.15
+
+              cat <<EOT >> /tmp/zookeeper.yaml
+              apiVersion: "zookeeper.pravega.io/v1beta1"
+              kind: "ZookeeperCluster"
+              metadata:
+                name: "instana-zookeeper"
+              spec:
+                # For all params and defaults, see https://github.com/pravega/zookeeper-operator/tree/master/charts/zookeeper#configuration
+                replicas: 3
+                config:
+                  tickTime: 2000
+                  initLimit: 10
+                  syncLimit: 5
+                  maxClientCnxns: 0
+                  autoPurgeSnapRetainCount: 20
+                  autoPurgePurgeInterval: 1
+                persistence:
+                  reclaimPolicy: Delete
+                  spec:
+                    resources:
+                      requests:
+                        storage: "10Gi"
+              EOT
+
+              kubectl create namespace instana-clickhouse --dry-run=client -o yaml | kubectl apply -f -
+              kubectl apply -f /tmp/zookeeper.yaml -n instana-clickhouse
+
+              helm repo add strimzi https://strimzi.io/charts/
+              helm repo update
+              helm upgrade --install strimzi strimzi/strimzi-kafka-operator --version 0.36.0 -n instana-kafka --create-namespace
+
+              cat <<EOT >> /tmp/kafka.yaml
+              apiVersion: kafka.strimzi.io/v1beta2
+              kind: Kafka
+              metadata:
+                name: instana
+                labels:
+                  strimzi.io/cluster: instana
+              spec:
+                kafka:
+                  version: 3.4.0
+                  replicas: 3
+                  listeners:
+                    - name: scram
+                      port: 9092
+                      type: internal
+                      tls: false
+                      authentication:
+                        type: scram-sha-512
+                      configuration:
+                        useServiceDnsDomain: true
+                  authorization:
+                    type: simple
+                    superUsers:
+                      - strimzi-kafka-user
+                  storage:
+                    type: jbod
+                    volumes:
+                      - id: 0
+                        type: persistent-claim
+                        size: 50Gi
+                        deleteClaim: true
+                  config:
+                    offsets.topic.replication.factor: 3
+                    transaction.state.log.replication.factor: 3
+                    transaction.state.log.min.isr: 3
+                zookeeper:
+                  replicas: 3
+                  storage:
+                    type: persistent-claim
+                    size: 5Gi
+                    deleteClaim: true
+                entityOperator:
+                  template:
+                    pod:
+                      tmpDirSizeLimit: 100Mi
+                  topicOperator: {}
+                  userOperator: {}
+              EOT
+
+              kubectl apply -f /tmp/kafka.yaml -n instana-kafka
+              kubectl wait kafka/instana --for=condition=Ready --timeout=300s -n instana-kafka
+
+              cat <<EOT >> /tmp/strimzi-kafka-user.yaml
+              apiVersion: kafka.strimzi.io/v1beta2
+              kind: KafkaUser
+              metadata:
+                name: strimzi-kafka-user
+                labels:
+                  strimzi.io/cluster: instana
+              spec:
+                authentication:
+                  type: scram-sha-512
+                authorization:
+                  type: simple
+                  acls:
+                    - resource:
+                        type: topic
+                        name: '*'
+                        patternType: literal
+                      operation: All
+                      host: "*"
+                    - resource:
+                        type: group
+                        name: '*'
+                        patternType: literal
+                      operation: All
+                      host: "*"
+              EOT
+
+              kubectl apply -f /tmp/strimzi-kafka-user.yaml -n instana-kafka
+              kubectl wait kafkauser/strimzi-kafka-user --for=condition=Ready --timeout=60s -n instana-kafka
+
+              printf "$(kubectl get secret strimzi-kafka-user  -n instana-kafka --template='{{index .data.password | base64decode}}')" | tee $(results.kafka-password.path)
+
+              helm repo add elastic https://helm.elastic.co
+              helm repo update
+              helm upgrade --install elastic-operator elastic/eck-operator -n instana-elastic --create-namespace --version=2.8.0
+
+              cat <<EOT >> /tmp/elastic.yaml
+              apiVersion: elasticsearch.k8s.elastic.co/v1
+              kind: Elasticsearch
+              metadata:
+                name: instana
+              spec:
+                version: 7.17.12
+                nodeSets:
+                  - name: default
+                    count: 3
+                    config:
+                      node.master: true
+                      node.data: true
+                      node.ingest: true
+                      node.store.allow_mmap: false
+                    volumeClaimTemplates:
+                      - metadata:
+                          name: elasticsearch-data # Do not change this name unless you set up a volume mount for the data path.
+                        spec:
+                          accessModes:
+                            - ReadWriteOnce
+                          resources:
+                            requests:
+                              storage: 20Gi
+                http:
+                  tls:
+                    selfSignedCertificate:
+                      disabled: true
+              EOT
+
+              kubectl apply -f /tmp/elastic.yaml -n instana-elastic
+              kubectl wait elasticsearch/instana --for=condition=ReconciliationComplete --timeout=300s -n instana-elastic
+
+              printf "$(kubectl get secret instana-es-elastic-user -n instana-elastic -o go-template='{{.data.elastic | base64decode}}')" | tee $(results.elasticsearch-password.path)
+
+              cat <<EOT >> /tmp/postgres_scc.yaml
+              apiVersion: security.openshift.io/v1
+              kind: SecurityContextConstraints
+              metadata:
+                name: postgres-scc
+              runAsUser:
+                type: MustRunAs
+                uid: 101
+              seLinuxContext:
+                type: RunAsAny
+              fsGroup:
+                type: RunAsAny
+              allowHostDirVolumePlugin: false
+              allowHostNetwork: true
+              allowHostPorts: true
+              allowPrivilegedContainer: false
+              allowHostIPC: true
+              allowHostPID: true
+              readOnlyRootFilesystem: false
+              users:
+                - system:serviceaccount:instana-postgres:postgres-operator
+                - system:serviceaccount:instana-postgres:postgres-pod
+                - system:serviceaccount:instana-postgres:default
+              EOT
+
+              kubectl apply -f /tmp/postgres_scc.yaml
+
+              helm repo add postgres https://opensource.zalando.com/postgres-operator/charts/postgres-operator
+              helm repo update
+              helm upgrade --install postgres-operator postgres/postgres-operator --create-namespace --version=1.10.0 --set configGeneral.kubernetes_use_configmaps=true --set securityContext.runAsUser=101 -n instana-postgres
+
+              cat <<EOT >> /tmp/postgres.yaml
+              apiVersion: "acid.zalan.do/v1"
+              kind: postgresql
+              metadata:
+                name: postgres
+              spec:
+                patroni:
+                  pg_hba:
+                    - local     all          all                            trust
+                    - host      all          all          0.0.0.0/0         md5
+                    - local     replication  standby                        trust
+                    - hostssl   replication  standby      all               md5
+                    - hostnossl all          all          all               reject
+                    - hostssl   all          all          all               md5
+                dockerImage: ghcr.io/zalando/spilo-15:3.0-p1
+                teamId: instana
+                numberOfInstances: 3
+                spiloRunAsUser: 101
+                spiloFSGroup: 103
+                spiloRunAsGroup: 103
+                postgresql:
+                  version: "15"
+                  parameters:  # Expert section
+                    shared_buffers: "32MB"
+                volume:
+                  size: 10Gi
+                  # Uncomment the line below to specify your own storage class, otherwise use the default.
+                  # storageClass: <REPLACE>
+                resources:
+                  requests:
+                    cpu: 500m
+                    memory: 2Gi
+                  limits:
+                    cpu: 1000m
+                    memory: 4Gi
+              EOT
+
+              kubectl apply -f /tmp/postgres.yaml --namespace=instana-postgres
+
+              printf "$(kubectl get secret postgres.postgres.credentials.postgresql.acid.zalan.do -n instana-postgres --template='{{index .data.password | base64decode}}')" | tee $(results.postgres-password.path)
+
+              cat <<EOT >> /tmp/cassandra_scc.yaml
+              apiVersion: security.openshift.io/v1
+              kind: SecurityContextConstraints
+              metadata:
+                name: cassandra-scc
+              runAsUser:
+                type: MustRunAs
+                uid: 999
+              seLinuxContext:
+                type: RunAsAny
+              fsGroup:
+                type: RunAsAny
+              allowHostDirVolumePlugin: false
+              allowHostNetwork: true
+              allowHostPorts: true
+              allowPrivilegedContainer: false
+              allowHostIPC: true
+              allowHostPID: true
+              readOnlyRootFilesystem: false
+              users:
+                - system:serviceaccount:instana-cassandra:cass-operator
+                - system:serviceaccount:instana-cassandra:default
+              EOT
+
+              kubectl apply -f /tmp/cassandra_scc.yaml
+
+              helm repo add k8ssandra https://helm.k8ssandra.io/stable
+              helm repo update
+              helm upgrade --install cass-operator k8ssandra/cass-operator -n instana-cassandra --create-namespace --version=0.42.0 --set securityContext.runAsGroup=999 --set securityContext.runAsUser=999
+
+              cat <<EOT >> /tmp/cassandra.yaml
+              apiVersion: cassandra.datastax.com/v1beta1
+              kind: CassandraDatacenter
+              metadata:
+                name: cassandra
+              spec:
+                clusterName: instana
+                serverType: cassandra
+                configBuilderImage: docker.io/datastax/cass-config-builder:1.0-ubi7
+                serverVersion: "4.1.2"
+                managementApiAuth:
+                  insecure: {}
+                size: 3
+                allowMultipleNodesPerWorker: false
+                resources:
+                  requests:
+                    cpu: 2000m
+                    memory: 8Gi
+                  limits:
+                    cpu: 4000m
+                    memory: 16Gi
+                storageConfig:
+                  cassandraDataVolumeClaimSpec:
+                    accessModes:
+                      - ReadWriteOnce
+                    resources:
+                      requests:
+                        storage: 100Gi
+                config:
+                  jvm-server-options:
+                    initial_heap_size: "4G"
+                    max_heap_size: "8G"
+                    additional-jvm-opts:
+                      - -Dcassandra.allow_unsafe_aggressive_sstable_expiration=true
+                  cassandra-yaml:
+                    authenticator: org.apache.cassandra.auth.PasswordAuthenticator
+                    authorizer: org.apache.cassandra.auth.CassandraAuthorizer
+                    role_manager: org.apache.cassandra.auth.CassandraRoleManager
+                    memtable_flush_writers: 8
+                    auto_snapshot: false
+                    gc_warn_threshold_in_ms: 10000
+                    otc_coalescing_strategy: DISABLED
+                    memtable_allocation_type: offheap_objects
+                    num_tokens: 256
+                    enable_drop_compact_storage: true
+              EOT
+
+              kubectl apply -f /tmp/cassandra.yaml --namespace=instana-cassandra
+              sleep 20
+              printf "$(kubectl get secret instana-superuser -n instana-cassandra --template='{{index .data.password | base64decode}}')" | tee $(results.cassandra-password.path)
+
+              helm repo add clickhouse-operator https://docs.altinity.com/clickhouse-operator/
+              helm repo update
+              helm upgrade --install clickhouse-operator clickhouse-operator/altinity-clickhouse-operator -n instana-clickhouse --version=0.21.2
+
+              kubectl create secret docker-registry clickhouse-image-secret \
+              --namespace=instana-clickhouse \
+              --docker-username=_ \
+              --docker-password=$(params.agent-key) \
+              --docker-server=artifact-public.instana.io --dry-run=client -o yaml | kubectl apply -f -
+
+              cat <<EOT >> /tmp/clickhouse.yaml
+              apiVersion: "clickhouse.altinity.com/v1"
+              kind: "ClickHouseInstallation"
+              metadata:
+                name: "instana"
+              spec:
+                defaults:
+                  templates:
+                    dataVolumeClaimTemplate: instana-clickhouse-data-volume
+                    logVolumeClaimTemplate: instana-clickhouse-log-volume
+                    serviceTemplate: service-template
+                configuration:
+                  files:
+                    config.d/storage.xml: |
+                      <yandex>
+                        <storage_configuration>
+                          <disks>
+                            <default/>
+                          </disks>
+                          <policies>
+                            <logs_policy>
+                              <volumes>
+                                <data>
+                                  <disk>default</disk>
+                                </data>
+                              </volumes>
+                            </logs_policy>
+                          </policies>
+                        </storage_configuration>
+                      </yandex>
+                  clusters:
+                    - name: local
+                      templates:
+                        podTemplate: clickhouse
+                      layout:
+                        shardsCount: 1
+                        replicasCount: 2
+                  zookeeper:
+                    nodes:
+                      - host: instana-zookeeper-headless.instana-clickhouse
+                  profiles:
+                    default/max_memory_usage: 10000000000
+                    default/joined_subquery_requires_alias: 0
+                    default/max_execution_time: 100
+                    default/max_query_size: 1048576
+                    default/use_uncompressed_cache: 0
+                    default/load_balancing: random
+                    default/background_pool_size: 32
+                    default/background_schedule_pool_size: 32
+                  quotas:
+                    default/interval/duration: 3600
+                    default/interval/queries: 0
+                    default/interval/errors: 0
+                    default/interval/result_rows: 0
+                    default/interval/read_rows: 0
+                    default/interval/execution_time: 0
+                  users:
+                    default/password: "clickhouse-pass"
+                    clickhouse-user/networks/ip: "::/0"
+                    clickhouse-user/password: "clickhouse-pass"
+                    # Or
+                    # Generate password and the corresponding SHA256 hash with:
+                    # $ PASSWORD=$(base64 < /dev/urandom | head -c8); echo "$PASSWORD"; echo -n "$PASSWORD" | sha256sum | tr -d '-'
+                    # 6edvj2+d                                                          <- first line is the password
+                    # a927723f4a42cccc50053e81bab1fcf579d8d8fb54a3ce559d42eb75a9118d65  <- second line is the corresponding SHA256 hash
+                    # clickhouse-user/password_sha256_hex: "a927723f4a42cccc50053e81bab1fcf579d8d8fb54a3ce559d42eb75a9118d65"
+                    # Or
+                    # Generate password and the corresponding SHA1 hash with:
+                    # $ PASSWORD=$(base64 < /dev/urandom | head -c8); echo "$PASSWORD"; echo -n "$PASSWORD" | sha1sum | tr -d '-' | xxd -r -p | sha1sum | tr -d '-'
+                    # LJfoOfxl                                  <- first line is the password, put this in the k8s secret
+                    # 3435258e803cefaab7db2201d04bf50d439f6c7f  <- the corresponding double SHA1 hash, put this below
+                    # clickhouse-user/password_double_sha1_hex: "3435258e803cefaab7db2201d04bf50d439f6c7f"
+
+                templates:
+                  podTemplates:
+                    - name: clickhouse
+                      spec:
+                        containers:
+                          - name: instana-clickhouse
+                            image: artifact-public.instana.io/self-hosted-images/k8s/clickhouse:23.3.2.37-1-lts-ibm_v0.26.0
+                            command:
+                              - clickhouse-server
+                              - --config-file=/etc/clickhouse-server/config.xml
+                        imagePullSecrets:
+                          - name: clickhouse-image-secret
+                  volumeClaimTemplates:
+                    - name: instana-clickhouse-data-volume
+                      spec:
+                        accessModes:
+                          - ReadWriteOnce
+                        resources:
+                          requests:
+                            storage: 100Gi
+                    - name: instana-clickhouse-log-volume
+                      spec:
+                        accessModes:
+                          - ReadWriteOnce
+                        resources:
+                          requests:
+                            storage: 1Gi
+                  serviceTemplates:
+                    - name: service-template
+                      spec:
+                        ports:
+                          - name: http
+                            port: 8123
+                          - name: tcp
+                            port: 9000
+                        type: ClusterIP
+              EOT
+
+              kubectl apply -f /tmp/clickhouse.yaml -n instana-clickhouse
+
+              printf "clickhouse-pass" | tee $(results.clickhouse-password.path)
       runAfter:
-          - create-agent-key-secret
-          - install-cert-manager
-      # retries: 3
-      
+        - create-agent-key-secret
+        - install-cert-manager
+      retries: 3
+    - name: install-instana-backend
+      params:
+        - name: kafka-password
+          value: $(tasks.install-instana-operator-and-datastores.results.kafka-password)
+        - name: elasticsearch-password
+          value: $(tasks.install-instana-operator-and-datastores.results.elasticsearch-password)
+        - name: postgres-password
+          value: $(tasks.install-instana-operator-and-datastores.results.postgres-password)
+        - name: cassandra-password
+          value: $(tasks.install-instana-operator-and-datastores.results.cassandra-password)
+        - name: clickhouse-password
+          value: $(tasks.install-instana-operator-and-datastores.results.clickhouse-password)
+      taskSpec:
+        results:
+          - name: fqdn
+            description: The fully qualified domain name of the cluster
+            type: string
+        params:
+          - name: agent-key
+            type: string
+            default: $(params.agent-key)
+          - name: user-valid-email
+            type: string
+            default: $(params.user-valid-email)
+          - name: sales-key
+            type: string
+            default: $(params.sales-key)
+          - name: instana-password
+            type: string
+            default: $(params.instana-password)
+          - name: namespace
+            type: string
+            default: $(params.namespace)
+          - name: storage-class
+            type: string
+            default: $(params.storage-class)
+          - name: crypto-seed
+            type: string
+            default: $(params.crypto-seed)
+          - name: kafka-password
+            type: string
+          - name: elasticsearch-password
+            type: string
+          - name: postgres-password
+            type: string
+          - name: cassandra-password
+            type: string
+          - name: clickhouse-password
+            type: string
+        steps:
+          - image: registry.access.redhat.com/ubi8/ubi
+            script: |
+              export VERIFY_CHECKSUM=false
 
+              cat << EOF > /etc/yum.repos.d/Instana-Product.repo
+              [instana-product]
+              name=Instana-Product
+              baseurl=https://_:$(params.agent-key)@artifact-public.instana.io/artifactory/rel-rpm-public-virtual/
+              enabled=1
+              gpgcheck=0
+              gpgkey=https://_:$(params.agent-key)@artifact-public.instana.io/artifactory/api/security/keypair/public/repositories/rel-rpm-public-virtual
+              repo_gpgcheck=1
+              EOF
 
+              cat <<EOF > /etc/yum.repos.d/kubernetes.repo
+              [kubernetes]
+              name=Kubernetes
+              baseurl=https://pkgs.k8s.io/core:/stable:/v1.28/rpm/
+              enabled=1
+              gpgcheck=1
+              gpgkey=https://pkgs.k8s.io/core:/stable:/v1.28/rpm/repodata/repomd.xml.key
+              EOF
 
+              yum clean expire-cache -y
+              yum update -y
+              yum install -y kubectl instana-kubectl openssl
 
-    # - name: configure-cloud-paks-services
-    #   runAfter:
-    #     - create-entitlement-key-secret
-    #   retries: 3
-    #   taskRef:
-    #     kind: Task
-    #     name: ibm-pak
-    #   params:
-    #     - name: SCRIPT
-    #       value: |
-    #         oc apply -f - <<EOF
-    #         apiVersion: v1
-    #         kind: ConfigMap
-    #         metadata:
-    #           name: cloud-pak-deployer-config
-    #           namespace: $(params.namespace)
-    #         data:
-    #           cpd-config.yaml: |
-    #             global_config:
-    #               environment_name: demo
-    #               cloud_platform: existing-ocp
-    #               confirm_destroy: True
+              kubectl-instana --version
 
-    #             openshift:
-    #             - name: cpd-demo
-    #               ocp_version: '$(params.ocp-client-version)'
-    #               cluster_name: cpd-demo
-    #               domain_name: example.com
-    #               openshift_storage:
-    #               - storage_name: auto-storage
-    #                 storage_type: ocs
+              curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/master/scripts/get-helm-3
+              chmod 700 get_helm.sh
+              ./get_helm.sh
 
-    #             #
-    #             # All tested cartridges. To install, change the "state" property to "installed". To uninstall, change the state
-    #             # to "removed" or comment out the entire cartridge. Make sure that the "-" and properties are aligned with the lite
-    #             # cartridge; the "-" is at position 3 and the property starts at position 5.
-    #             #
-    #             # If a cartridge has dependencies and you want to install it, you must ensure that the dependent cartridge is also
-    #             # installed.
-    #             #
+              cat <<EOT >> /tmp/namespaces.yaml
+              apiVersion: v1
+              kind: Namespace
+              metadata:
+                name: instana-core
+                labels:
+                  app.kubernetes.io/name: instana-core
+              ---
+              apiVersion: v1
+              kind: Namespace
+              metadata:
+                name: instana-units
+                labels:
+                  app.kubernetes.io/name: instana-units
+              EOT
 
-    #             cp4d:
-    #             - project: cpd
-    #               openshift_cluster_name: cpd-demo
-    #               cp4d_version: $(params.cp4d-version)
-    #               sequential_install: False
-    #               accept_licenses: True
-    #               cartridges:
-    #               - name: cp-foundation
-    #                 license_service:
-    #                   state: disabled
-    #                   threads_per_core: 2
+              kubectl apply -f /tmp/namespaces.yaml
 
-    #               - name: lite
+              kubectl create secret docker-registry instana-registry \
+                --namespace=instana-core \
+                --docker-username=_ \
+                --docker-password=$(params.agent-key) \
+                --docker-server=artifact-public.instana.io --dry-run=client -o yaml | kubectl apply -f -
 
-    #               - name: scheduler
-    #                 state: $(params.scheduler-state)
+              FQDN=$(kubectl get route console -n openshift-console | sed -n 's/.*console-openshift-console\.apps\.\(.*\.com\).*/\1/p')
+              printf "$FQDN" | tee $(results.fqdn.path)
+              echo $FQDN
 
-    #               - name: analyticsengine
-    #                 description: Analytics Engine Powered by Apache Spark
-    #                 size: $(params.analyticsengine-size)
-    #                 state: $(params.analyticsengine-state)
+              openssl req -x509 -newkey rsa:2048 -keyout tls.key -out tls.crt -days 365 -nodes -subj "/CN=instana.apps.$FQDN"
 
-    #               - name: bigsql
-    #                 description: Db2 Big SQL
-    #                 state: $(params.bigsql-state)
+              kubectl create secret tls instana-tls --namespace instana-core \
+                --cert=tls.crt --key=tls.key  --dry-run=client -o yaml | kubectl apply -f -
 
-    #               - name: ca
-    #                 description: Cognos Analytics
-    #                 size: $(params.ca-size)
-    #                 instances:
-    #                 - name: $(params.ca-instance)
-    #                   metastore_ref: ca-metastore
-    #                 state: $(params.ca-state)
+              kubectl create secret docker-registry instana-registry \
+                --namespace=instana-units \
+                --docker-username=_ \
+                --docker-password=$(params.agent-key) \
+                --docker-server=artifact-public.instana.io --dry-run=client -o yaml | kubectl apply -f -
 
-    #               - name: cde
-    #                 description: Cognos Dashboards
-    #                 state: $(params.cde-state)
+              kubectl instana license download --sales-key $(params.sales-key)
+              LICENSE=$(cat license.json)
 
-    #               - name: datagate
-    #                 description: Db2 Data Gate
-    #                 state: $(params.datagate-state)
+              # generate Diffie-Hellman parameters
+              openssl dhparam -out dhparams.pem 2048
+              DHPARAMS=$(sed -e 's/^/  /' dhparams.pem)
+              # Create the key
+              openssl genrsa -aes128 -passout pass:nopass -out key.pem 2048
+              # Create the certificate
+              openssl req -new -x509 -passin pass:nopass -key key.pem -out cert.pem -days 365 -subj "/C=US/ST=Texas/L=Dallas/O=IBM/OU=Techzone/CN=instana.apps.$FQDN"
+              # Combine the two into a single file
+              cat key.pem cert.pem > sp.pem
+              COMBINEDKEY=$(sed -e 's/^/    /' sp.pem)
 
-    #               - name: datastage-ent
-    #                 description: DataStage Enterprise
-    #                 state: $(params.datastage-ent-state)
+              cat <<EOT >> /tmp/config.yaml
+              # Diffie-Hellman parameters to use
+              dhParams: |
+              $DHPARAMS
+              # The download key you received from us
+              downloadKey: $(params.agent-key)
+              # The sales key you received from us
+              salesKey: $(params.sales-key)
+              # Seed for creating crypto tokens. Pick a random 12 char string
+              tokenSecret: $(params.crypto-seed)
+              # Configuration for raw spans storage
+              storageConfigs:
+                rawSpans:
+                  pvcConfig:
+                      accessModes:
+                        - ReadWriteMany
+                      resources:
+                        requests:
+                          storage: 100Gi
+                      volumeName: my-nfs-volume
+                      storageClassName: $(params.storage-class)
 
-    #               - name: datastage-ent-plus
-    #                 description: DataStage Enterprise Plus
-    #                 state: $(params.datastage-ent-plus-state)
-    #                 # instances:
-    #                 #   - name: ds-instance
-    #                 #     # Optional settings
-    #                 #     description: "datastage ds-instance"
-    #                 #     size: medium
-    #                 #     storage_class: efs-nfs-client
-    #                 #     storage_size_gb: 60
-    #                 #     # Custom Scale options
-    #                 #     scale_px_runtime:
-    #                 #       replicas: 2
-    #                 #       cpu_request: 500m
-    #                 #       cpu_limit: 2
-    #                 #       memory_request: 2Gi
-    #                 #       memory_limit: 4Gi
-    #                 #     scale_px_compute:
-    #                 #       replicas: 2
-    #                 #       cpu_request: 1
-    #                 #       cpu_limit: 3
-    #                 #       memory_request: 4Gi
-    #                 #       memory_limit: 12Gi
+              # SAML/OIDC configuration
+              serviceProviderConfig:
+                # Password for the key/cert file
+                keyPassword: nopass
+                # The combined key/cert file
+                pem: |
+              $COMBINEDKEY
+              datastoreConfigs:
+                kafkaConfig:
+                  adminUser: strimzi-kafka-user
+                  adminPassword: $(params.kafka-password)
+                  consumerUser: strimzi-kafka-user
+                  consumerPassword: $(params.kafka-password)
+                  producerUser: strimzi-kafka-user
+                  producerPassword: $(params.kafka-password)
+                elasticsearchConfig:
+                  adminUser: elastic
+                  adminPassword: $(params.elasticsearch-password)
+                  user: elastic
+                  password: $(params.elasticsearch-password)
+                postgresConfigs:
+                  - user: postgres
+                    password: $(params.postgres-password)
+                    adminUser: postgres
+                    adminPassword: $(params.postgres-password)
+                clickhouseConfigs:
+                  - user: clickhouse-user
+                    password: $(params.clickhouse-password)
+                    adminUser: clickhouse-user
+                    adminPassword: $(params.clickhouse-password)
+                cassandraConfigs:
+                    - keyspaces:
+                        - profiles
+                      user: instana-superuser
+                      password: $(params.cassandra-password)
+                      adminUser: instana-superuser
+                      adminPassword: $(params.cassandra-password)
+                    - keyspaces:
+                        - spans
+                        - metrics
+                        - state
+                      user: instana-superuser
+                      password: $(params.cassandra-password)
+                      adminUser: instana-superuser
+                      adminPassword: $(params.cassandra-password)
+              EOT
 
-    #               - name: db2
-    #                 description: Db2 OLTP
-    #                 size: $(params.db2-size)
-    #                 instances:
-    #                 - name: ca-metastore
-    #                   metadata_size_gb: 20
-    #                   data_size_gb: 20
-    #                   backup_size_gb: 20
-    #                   transactionlog_size_gb: 20
-    #                 state: $(params.db2-state)
+              kubectl create secret generic instana-core --namespace instana-core --from-file=/tmp/config.yaml  --dry-run=client -o yaml | kubectl apply -f -
 
-    #               - name: db2wh
-    #                 description: Db2 Warehouse
-    #                 state: $(params.db2wh-state)
+              cat <<EOT >> /tmp/core.yaml
+              apiVersion: instana.io/v1beta2
+              kind: Core
+              metadata:
+                namespace: instana-core
+                name: instana-core
+              spec:
+                # The domain under which Instana is reachable
+                baseDomain: instana.apps.$FQDN
 
-    #               - name: dmc
-    #                 description: Db2 Data Management Console
-    #                 state: $(params.dmc-state)
+                # Depending on your cluster setup, you may need to specify an image pull secret.
+                imagePullSecrets:
+                  - name: instana-registry
 
-    #               - name: dods
-    #                 description: Decision Optimization
-    #                 size: $(params.dods-size)
-    #                 state: $(params.dods-state)
+                # This configures an SMTP server for sending e-mails.
+                # Alternatively, Amazon SES is supported. Please see API reference for details.
+                emailConfig:
+                  smtpConfig:
+                    from: smtp@example.com
+                    host: smtp.example.com
+                    port: 465
+                    useSSL: true
 
-    #               - name: dp
-    #                 description: Data Privacy
-    #                 size: $(params.dp-size)
-    #                 state: $(params.dp-state)
+                # The operator can install network policies for restricting network traffic
+                # to what's required only. By default, network policies are disabled.
+                # Set this to true if you want to enable them. We suggest you leave this turned off
+                # initially until you've made sure everything works.
+                # enableNetworkPolicies: false
 
-    #               - name: dpra
-    #                 description: Data Privacy Risk Assessment
-    #                 state: $(params.dpra-state)
+                resourceProfile: small
 
-    #               - name: dv
-    #                 description: Data Virtualization
-    #                 size: $(params.dv-size)
-    #                 instances:
-    #                 - name: $(params.dv-instance)
-    #                 state: $(params.dv-state)
+                agentAcceptorConfig:
+                  host: ingress.instana.apps.$FQDN
+                  port: 443
 
-    #               # Please note that for EDB Postgress, a secret edb-postgres-license-key must be created in the vault
-    #               # before deploying
-    #               - name: edb_cp4d
-    #                 description: EDB Postgres
-    #                 state: removed
-    #                 instances:
-    #                   - name: instance1
-    #                     version: "13.5"
-    #                     #type: Standard
-    #                     #members: 1
-    #                     #size_gb: 50
-    #                     #resource_request_cpu: 1000m
-    #                     #resource_request_memory: 4Gi
-    #                     #resource_limit_cpu: 1000m
-    #                     #resource_limit_memory: 4Gi
+                storageConfigs:
+                  rawSpans:
+                    pvcConfig:
+                      accessModes:
+                        - ReadWriteMany
+                      resources:
+                        requests:
+                          storage: 100Gi
+                      storageClassName: $(params.storage-class)
 
-    #               - name: factsheet
-    #                 description: AI Factsheets
-    #                 size: $(params.factsheet-size)
-    #                 state: $(params.factsheet-state)
+                datastoreConfigs:
+                  cassandraConfigs:
+                    - hosts:
+                        - instana-cassandra-service.instana-cassandra
+                      keyspaces:
+                        - profiles
+                      authEnabled: true
+                    - hosts:
+                        - instana-cassandra-service.instana-cassandra
+                      keyspaces:
+                        - spans
+                        - metrics
+                        - state
+                      authEnabled: true
+                  postgresConfigs:
+                    - hosts:
+                        - postgres.instana-postgres
+                      databases:
+                        - butlerdb
+                        - tenantdb
+                        - sales
+                      authEnabled: true
+                  clickhouseConfigs:
+                    - hosts:
+                        - chi-instana-local-0-0.instana-clickhouse
+                        - chi-instana-local-0-1.instana-clickhouse
+                      authEnabled: true
+                  elasticsearchConfig:
+                    hosts:
+                      - instana-es-http.instana-elastic
+                    authEnabled: true
+                  kafkaConfig:
+                    hosts:
+                      - instana-kafka-bootstrap.instana-kafka
+                    authEnabled: true
+                    saslMechanism: SCRAM-SHA-512
+              EOT
 
-    #               - name: hadoop
-    #                 description: Execution Engine for Apache Hadoop
-    #                 size: $(params.hadoop-size)
-    #                 state: $(params.hadoop-state)
+              kubectl apply -f /tmp/core.yaml
 
-    #               - name: match360
-    #                 description: IBM Match 360
-    #                 size: $(params.match360-size)
-    #                 wkc_enabled: $(params.match360-wkc-enabled)
-    #                 state: $(params.match360-state)
+              cat <<EOT >> /tmp/config-unit.yaml
+              # The initial user of this tenant unit with admin role, default admin@instana.local.
+              # Must be a valid e-mail address.
+              # NOTE:
+              # This only applies when setting up the tenant unit.
+              # Changes to this value won't have any effect.
+              initialAdminUser: $(params.user-valid-email)
+              # The initial admin password.
+              # NOTE:
+              # This is only used for the initial tenant unit setup.
+              # Changes to this value won't have any effect.
+              initialAdminPassword: $(params.instana-password)
+              # A list of Instana licenses. Multiple licenses may be specified.
+              licenses: $LICENSE
+              # A list of agent keys. Specifying multiple agent keys enables gradually rotating agent keys.
+              agentKeys:
+                - $(params.agent-key)
+              EOT
 
-    #               - name: openpages
-    #                 description: OpenPages
-    #                 state: $(params.openpages-state)
+              kubectl create secret generic tenant0-unit0 --namespace instana-units --from-file=config.yaml=/tmp/config-unit.yaml --dry-run=client -o yaml | kubectl apply -f -
 
-    #               # For Planning Analytics, the case version is needed due to defect in olm utils
-    #               - name: planning-analytics
-    #                 description: Planning Analytics
-    #                 state: $(params.planning-analytics-state)
+              cat <<EOT >> /tmp/unit.yaml
+              apiVersion: instana.io/v1beta2
+              kind: Unit
+              metadata:
+                namespace: instana-units
+                name: tenant0-unit0
+              spec:
+                # Must refer to the namespace of the associated Core object that was created previously
+                coreName: instana-core
 
-    #               - name: replication
-    #                 description: Data Replication
-    #                 license: IDRC
-    #                 size: $(params.replication-size)
-    #                 state: $(params.replication-state)
+                # Must refer to the name of the associated Core object that was created previously
+                coreNamespace: instana-core
 
-    #               - name: rstudio
-    #                 description: RStudio Server with R 3.6
-    #                 size: $(params.rstudio-size)
-    #                 state: $(params.rstudio-state)
+                # The name of the tenant
+                tenantName: tenant0
 
-    #               - name: spss
-    #                 description: SPSS Modeler
-    #                 state: $(params.spss-state)
+                # The name of the unit within the tenant
+                unitName: unit0
 
-    #               - name: voice-gateway
-    #                 description: Voice Gateway
-    #                 replicas: $(params.voice-gateway-replicas)
-    #                 state: $(params.voice-gateway-state)
+                # The same rules apply as for Cores. May be ommitted. Default is 'medium'
+                resourceProfile: large
+              EOT
 
-    #               - name: watson-assistant
-    #                 description: Watson Assistant
-    #                 size: $(params.watson-assistant-size)
-    #                 state: $(params.watson-assistant-state)
-
-    #               - name: watson-discovery
-    #                 description: Watson Discovery
-    #                 state: $(params.watson-discovery-state)
-
-    #               # For Watson Knowledge Studio, the case version is needed due to defect in olm utils
-    #               - name: watson-ks
-    #                 description: Watson Knowledge Studio
-    #                 size: $(params.watson-ks-size)
-    #                 state: $(params.watson-ks-state)
-
-    #               - name: watson-openscale
-    #                 description: Watson OpenScale
-    #                 size: $(params.watson-openscale-size)
-    #                 state: $(params.watson-openscale-state)
-
-    #               - name: watson-speech
-    #                 description: Watson Speech (STT and TTS)
-    #                 stt_size: $(params.watson-speech-stt-size)
-    #                 tts_size: $(params.watson-speech-tts-size)
-    #                 state: $(params.watson-speech-state)
-
-    #               - name: wkc
-    #                 description: Watson Knowledge Catalog
-    #                 size: $(params.wkc-size)
-    #                 state: $(params.wkc-state)
-    #                 installation_options:
-    #                   install_wkc_core_only: $(params.wkc-options-core-only)
-    #                   enableKnowledgeGraph: $(params.wkc-options-knowledge-graph)
-    #                   enableDataQuality: $(params.wkc-options-enable-data-quality)
-    #                   enableFactSheet: $(params.wkc-options-enable-fact-sheet)
-    #                   enableMANTA: $(params.wkc-options-enable-manta)
-
-    #               - name: wml
-    #                 description: Watson Machine Learning
-    #                 size: $(params.wml-size)
-    #                 state: $(params.wml-state)
-
-    #               - name: wml-accelerator
-    #                 description: Watson Machine Learning Accelerator
-    #                 replicas: $(params.wml-accelerator-replicas)
-    #                 size: $(params.wml-accelerator-size)
-    #                 state: $(params.wml-accelerator-state)
-
-    #               - name: ws
-    #                 description: Watson Studio
-    #                 state: $(params.ws-state)
-
-    #               - name: ws-pipelines
-    #                 description: Watson Studio Pipelines
-    #                 state: $(params.ws-pipelines-state)
-
-    #               - name: ws-runtimes
-    #                 description: Watson Studio Runtimes
-    #                 runtimes:
-    #                 - ibm-cpd-ws-runtime-py39
-    #                 - ibm-cpd-ws-runtime-222-py
-    #                 - ibm-cpd-ws-runtime-py39gpu
-    #                 - ibm-cpd-ws-runtime-222-pygpu
-    #                 - ibm-cpd-ws-runtime-r36
-    #                 - ibm-cpd-ws-runtime-222-r
-    #                 state: $(params.ws-runtimes-state)
-
-    #               # Cartridges where extra work is needed (will not install automatically)
-
-    #               # Product Master requires set up of the Db2 instance secret before install
-    #               - name: productmaster
-    #                 description: Product Master
-    #                 size: small
-    #                 state: removed
-    #         EOF
-    # - name: run-the-deployer
-    #   taskRef:
-    #     kind: Task
-    #     name: ibm-pak
-    #   timeout: 6h0m0s
-    #   retries: 3
-    #   runAfter:
-    #     - configure-cloud-paks-services
-    #   params:
-    #     - name: SCRIPT
-    #       value: |
-    #         oc delete job cloud-pak-deployer -n $(params.namespace) --ignore-not-found
-
-    #         sleep 20
-
-    #         oc apply -f - <<EOF
-    #         apiVersion: batch/v1
-    #         kind: Job
-    #         metadata:
-    #           labels:
-    #             app: cloud-pak-deployer
-    #           name: cloud-pak-deployer
-    #           namespace: $(params.namespace)
-    #         spec:
-    #           parallelism: 1
-    #           completions: 1
-    #           backoffLimit: 0
-    #           template:
-    #             metadata:
-    #               name: cloud-pak-deployer
-    #               labels:
-    #                 app: cloud-pak-deployer
-    #             spec:
-    #               containers:
-    #               - name: cloud-pak-deployer
-    #                 image: quay.io/cloud-pak-deployer/cloud-pak-deployer:latest
-    #                 imagePullPolicy: Always
-    #                 terminationMessagePath: /dev/termination-log
-    #                 terminationMessagePolicy: File
-    #                 env:
-    #                 - name: CONFIG_DIR
-    #                   value: /Data/cpd-config
-    #                 - name: STATUS_DIR
-    #                   value: /Data/cpd-status
-    #                 - name: CP_ENTITLEMENT_KEY
-    #                   valueFrom:
-    #                     secretKeyRef:
-    #                       key: cp-entitlement-key
-    #                       name: cloud-pak-entitlement-key
-    #                 volumeMounts:
-    #                 - name: config-volume
-    #                   mountPath: /Data/cpd-config/config
-    #                 - name: status-volume
-    #                   mountPath: /Data/cpd-status
-    #                 command: ["/bin/sh","-xc"]
-    #                 args:
-    #                   - /cloud-pak-deployer/cp-deploy.sh env apply -v
-    #               restartPolicy: Never
-    #               securityContext:
-    #                 runAsUser: 0
-    #               serviceAccountName: cloud-pak-deployer-sa
-    #               volumes:
-    #               - name: config-volume
-    #                 configMap:
-    #                   name: cloud-pak-deployer-config
-    #               - name: status-volume
-    #                 persistentVolumeClaim:
-    #                   claimName: cloud-pak-deployer-status
-    #         EOF
-
-    #         sleep 20
-
-    #         while true
-    #         do
-    #           is_complete=$(oc get -n $(params.namespace) job/cloud-pak-deployer -o yaml | yq '.status.conditions.[] | select(.type == "Complete") | contains({"status": "'True'"})')
-    #           if [[ $is_complete != "true" ]]; then
-    #             echo "Waiting for job to be Complete."
-    #           else
-    #             echo "Cloud Pak Deployer job is Complete."
-    #             break
-    #           fi
-
-    #           did_fail=$(oc get -n $(params.namespace) job/cloud-pak-deployer -o yaml | yq '.status.conditions.[] | select(.type == "Failed") | contains({"status": "'True'"})')
-    #           if [[ $did_fail == "true" ]]; then
-    #             echo "Cloud Pak Deployer job failed."
-    #             echo $(oc get -n $(params.namespace) job/cloud-pak-deployer -o yaml | yq '.status.conditions.[] | select(.type == "Failed") | .reason')
-    #             echo $(oc get -n $(params.namespace) job/cloud-pak-deployer -o yaml | yq '.status.conditions.[] | select(.type == "Failed") | .message')
-    #             exit 68
-    #           fi
-
-    #           sleep 10
-    #         done
+              kubectl apply -f /tmp/unit.yaml
+      runAfter:
+        - install-instana-operator-and-datastores
+      retries: 3
+    - name: create-routes
+      taskRef:
+        kind: Task
+        name: ibm-pak
+      runAfter:
+        - install-instana-backend
+      retries: 3
+      params:
+        - name: SCRIPT
+          value: |
+            oc create route passthrough base-domain --hostname=instana.apps.$(tasks.install-instana-backend.results.fqdn) --service=gateway --port=https -n instana-core --dry-run=client -o yaml | kubectl apply -f -
+            oc create route passthrough unit0-tenant0-ui --hostname=unit0-tenant0.instana.apps.$(tasks.install-instana-backend.results.fqdn) --service=gateway --port=https -n instana-core --dry-run=client -o yaml | kubectl apply -f -
+            oc create route passthrough acceptor  --hostname=ingress.instana.apps.$(tasks.install-instana-backend.results.fqdn) --service=acceptor  --port=8600  -n instana-core --dry-run=client -o yaml | kubectl apply -f -
