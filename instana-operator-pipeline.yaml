@@ -9,6 +9,14 @@ spec:
     - name: user-valid-email
       type: string
       description: An accessible email for the configuration of Instana's initial admin user
+    - name: docker-username
+      type: string
+      description: A valid docker username for the installer
+      default: "false"
+    - name: docker-access-token
+      type: string
+      description: The access token for the docker username of the installer
+      default: "false"
     - name: instana-password
       type: string
       description: Password for instana tenant unit with admin role
@@ -83,7 +91,7 @@ spec:
               name: $(params.namespace)
             EOF
     - name: test-agent-key
-      retries: 3
+      # retries: 3
       params:
         - name: agent-key
           value: "$(params.agent-key)"
@@ -93,10 +101,13 @@ spec:
             type: string
             description: user provided Instana agent key
         steps:
-          - image: docker
+          - image: podman
+            securityContext:
+              capabilities:
+                add: ["SETFCAP"]
             script: |
               echo "testing key for artifact-public.instana.io"
-              docker login artifact-public.instana.io --username _ --password $(params.agent-key)
+              podman login artifact-public.instana.io --username _ --password $(params.agent-key)
       runAfter:
         - add-namespace
     - name: create-agent-key-secret
@@ -121,6 +132,13 @@ spec:
           value: |
             oc create namespace cert-manager            
             oc apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.12.2/cert-manager.yaml
+
+
+            if [ "$(params.docker-access-token)" != "false" ]; then
+                echo "Creating Docker.io secret with user's login info"
+                oc create secret docker-registry --docker-server=docker.io --docker-username=$(params.docker-username) --docker-password=$(params.docker-access-token) -n $(params.namespace) dockerpullsecret
+                oc secrets link default dockerpullsecret --for=pull -n $(params.namespace)
+            fi
     - name: install-instana-operator-and-datastores
       taskSpec:
         params:
@@ -223,6 +241,7 @@ spec:
 
               kubectl create namespace instana-clickhouse --dry-run=client -o yaml | kubectl apply -f -
               kubectl apply -f /tmp/zookeeper.yaml -n instana-clickhouse
+              sleep 200
 
               helm repo add strimzi https://strimzi.io/charts/
               helm repo update
@@ -278,6 +297,7 @@ spec:
               EOT
 
               kubectl apply -f /tmp/kafka.yaml -n instana-kafka
+              sleep 200
               kubectl wait kafka/instana --for=condition=Ready --timeout=300s -n instana-kafka
 
               cat <<EOT >> /tmp/strimzi-kafka-user.yaml
@@ -308,6 +328,7 @@ spec:
               EOT
 
               kubectl apply -f /tmp/strimzi-kafka-user.yaml -n instana-kafka
+              sleep 200
               kubectl wait kafkauser/strimzi-kafka-user --for=condition=Ready --timeout=60s -n instana-kafka
 
               printf "$(kubectl get secret strimzi-kafka-user  -n instana-kafka --template='{{index .data.password | base64decode}}')" | tee $(results.kafka-password.path)
@@ -347,6 +368,7 @@ spec:
               EOT
 
               kubectl apply -f /tmp/elastic.yaml -n instana-elastic
+              sleep 200
               kubectl wait elasticsearch/instana --for=condition=ReconciliationComplete --timeout=300s -n instana-elastic
 
               printf "$(kubectl get secret instana-es-elastic-user -n instana-elastic -o go-template='{{.data.elastic | base64decode}}')" | tee $(results.elasticsearch-password.path)
@@ -420,6 +442,7 @@ spec:
               EOT
 
               kubectl apply -f /tmp/postgres.yaml --namespace=instana-postgres
+              sleep 200
 
               printf "$(kubectl get secret postgres.postgres.credentials.postgresql.acid.zalan.do -n instana-postgres --template='{{index .data.password | base64decode}}')" | tee $(results.postgres-password.path)
 
@@ -501,7 +524,7 @@ spec:
               EOT
 
               kubectl apply -f /tmp/cassandra.yaml --namespace=instana-cassandra
-              sleep 20
+              sleep 200
               printf "$(kubectl get secret instana-superuser -n instana-cassandra --template='{{index .data.password | base64decode}}')" | tee $(results.cassandra-password.path)
 
               helm repo add clickhouse-operator https://docs.altinity.com/clickhouse-operator/
@@ -626,12 +649,12 @@ spec:
               EOT
 
               kubectl apply -f /tmp/clickhouse.yaml -n instana-clickhouse
+              sleep 200
 
               printf "clickhouse-pass" | tee $(results.clickhouse-password.path)
       runAfter:
         - create-agent-key-secret
         - install-cert-manager
-      retries: 3
     - name: install-instana-backend
       params:
         - name: kafka-password
@@ -972,12 +995,48 @@ spec:
       runAfter:
         - install-instana-operator-and-datastores
       retries: 3
-    - name: create-routes
+    - name: verify-core-pods
       taskRef:
         kind: Task
         name: ibm-pak
       runAfter:
         - install-instana-backend
+      params:
+        - name: SCRIPT
+          value: |
+            while true
+            do
+              RESULT=$(oc wait -n instana-core pod --for=condition=Ready --all)
+              if [$? -eq 0]; then
+                echo "All pods Ready."
+                break
+              fi
+              sleep 10
+            done
+    - name: verify-units-pods
+      taskRef:
+        kind: Task
+        name: ibm-pak
+      runAfter:
+        - verify-core-pods
+      params:
+        - name: SCRIPT
+          value: |
+            while true
+            do
+              RESULT=$(oc wait -n instana-units pod --for=condition=Ready --all)
+              if [$? -eq 0]; then
+                echo "All pods Ready."
+                break
+              fi
+              sleep 10
+            done
+    - name: create-routes
+      taskRef:
+        kind: Task
+        name: ibm-pak
+      runAfter:
+        - verify-units-pods
       retries: 3
       params:
         - name: SCRIPT
