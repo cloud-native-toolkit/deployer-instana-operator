@@ -7,10 +7,10 @@ spec:
   pipelineRef:
     name: instana-operator
   params:
-    # - name: instana-password
-    #   value: "fakepassword"
+    - name: instana-password
+      value: "fakepassword"
     # - name: user-valid-email
-    #   value: "valid-email"
+    #   value: "<your-valid-email>"
     - name: namespace
       value: "instana-operator"
     - name: storage-class
@@ -18,6 +18,13 @@ spec:
     - name: ocp-client-version
       value: "4.12"
     # - name: agent-key
-    #   value: "valid-agent-key"
+    #   value: "<your-agent-key>"
     # - name: sales-key
-    #   value: "valid-sales-key"
+    #   value: "<your-sales-key>"
+    - name: docker-username
+      value: "false"
+    - name: docker-access-token
+      value: "false"
+  podTemplate:
+    securityContext:
+      fsGroup: 65532

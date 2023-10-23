@@ -40,6 +40,10 @@ spec:
       type: string
       description: The name of the secret storing the Instana agent key
       default: "instana-agent-key"
+    - name: instana-operator-image-tag
+      type: string
+      description: Image tag for Instana operator
+      default: "259-0"
     - name: crypto-seed
       type: string
       description: Seed for creating crypto tokens. Pick a random 12 char string
@@ -70,8 +74,8 @@ spec:
           value: |
             instana_route=$(oc get route unit0-tenant0-ui -n instana-core --template='{{ .spec.host }}')
             echo "Console Route: $instana_route"
-            echo "Username: $params.user-valid-email"
-            echo "Password: $params.instana-password"
+            echo "Username: $(params.user-valid-email)"
+            echo "Password: $(params.instana-password)"
 
             oc patch configmap/pipeline-output -p "{\"data\":{\"Status\":\"Pipeline run Successful\",\"Instana-Console-Route\":\"${instana_route}\",\"Instana-Initial-Admin-Username\":\"$(params.user-valid-email)\",\"Instana-Initial-Admin-Password\":\"$(params.instana-password)\"}}"
   tasks:
@@ -136,8 +140,19 @@ spec:
 
             if [ "$(params.docker-access-token)" != "false" ]; then
                 echo "Creating Docker.io secret with user's login info"
-                oc create secret docker-registry --docker-server=docker.io --docker-username=$(params.docker-username) --docker-password=$(params.docker-access-token) -n $(params.namespace) dockerpullsecret
-                oc secrets link default dockerpullsecret --for=pull -n $(params.namespace)
+
+                oc get secret pull-secret \
+                -n openshift-config \
+                --template='{{index .data ".dockerconfigjson" | base64decode}}' > /tmp/global_pull_secret.cfg
+
+                oc registry login \
+                --registry="docker.io" \
+                --auth-basic="$(params.docker-username):$(params.docker-access-token)" \
+                --to=/tmp/global_pull_secret.cfg
+
+                oc set data secret/pull-secret \
+                -n openshift-config \
+                --from-file=.dockerconfigjson=/tmp/global_pull_secret.cfg
             fi
     - name: install-instana-operator-and-datastores
       taskSpec:
@@ -148,6 +163,9 @@ spec:
           - name: namespace
             type: string
             default: $(params.namespace)
+          - name: instana-operator-image-tag
+            type: string
+            default: $(params.instana-operator-image-tag)
           - name: agent-key-secret-name
             type: string
             default: $(params.agent-key-secret-name)
@@ -171,6 +189,7 @@ spec:
           - image: registry.access.redhat.com/ubi8/ubi
             script: |
               export VERIFY_CHECKSUM=false
+              export INSTANA_DISABLE_DB_VERSION_CHECKS=true
 
               cat << EOF > /etc/yum.repos.d/Instana-Product.repo
               [instana-product]
@@ -203,8 +222,6 @@ spec:
               EOT
 
               kubectl-instana operator apply --namespace=$(params.namespace) --values /tmp/values.yaml
-
-              kubectl-instana operator apply --namespace=$(params.namespace)
 
               ls -a /tmp
 
@@ -241,7 +258,7 @@ spec:
 
               kubectl create namespace instana-clickhouse --dry-run=client -o yaml | kubectl apply -f -
               kubectl apply -f /tmp/zookeeper.yaml -n instana-clickhouse
-              sleep 200
+              sleep 20
 
               helm repo add strimzi https://strimzi.io/charts/
               helm repo update
@@ -297,7 +314,7 @@ spec:
               EOT
 
               kubectl apply -f /tmp/kafka.yaml -n instana-kafka
-              sleep 200
+              sleep 20
               kubectl wait kafka/instana --for=condition=Ready --timeout=300s -n instana-kafka
 
               cat <<EOT >> /tmp/strimzi-kafka-user.yaml
@@ -442,7 +459,7 @@ spec:
               EOT
 
               kubectl apply -f /tmp/postgres.yaml --namespace=instana-postgres
-              sleep 200
+              sleep 20
 
               printf "$(kubectl get secret postgres.postgres.credentials.postgresql.acid.zalan.do -n instana-postgres --template='{{index .data.password | base64decode}}')" | tee $(results.postgres-password.path)
 
@@ -475,6 +492,8 @@ spec:
               helm repo add k8ssandra https://helm.k8ssandra.io/stable
               helm repo update
               helm upgrade --install cass-operator k8ssandra/cass-operator -n instana-cassandra --create-namespace --version=0.42.0 --set securityContext.runAsGroup=999 --set securityContext.runAsUser=999
+
+              kubectl wait -n instana-cassandra pod --for=condition=Ready --timeout=20s --all
 
               cat <<EOT >> /tmp/cassandra.yaml
               apiVersion: cassandra.datastax.com/v1beta1
@@ -616,7 +635,7 @@ spec:
                       spec:
                         containers:
                           - name: instana-clickhouse
-                            image: artifact-public.instana.io/self-hosted-images/k8s/clickhouse:23.3.2.37-1-lts-ibm_v0.26.0
+                            image: artifact-public.instana.io/self-hosted-images/k8s/clickhouse:23.3.10.5-1-lts-ibm_v0.29.0
                             command:
                               - clickhouse-server
                               - --config-file=/etc/clickhouse-server/config.xml
@@ -655,6 +674,7 @@ spec:
       runAfter:
         - create-agent-key-secret
         - install-cert-manager
+      retries: 2
     - name: install-instana-backend
       params:
         - name: kafka-password
@@ -1004,15 +1024,7 @@ spec:
       params:
         - name: SCRIPT
           value: |
-            while true
-            do
-              RESULT=$(oc wait -n instana-core pod --for=condition=Ready --all)
-              if [$? -eq 0]; then
-                echo "All pods Ready."
-                break
-              fi
-              sleep 10
-            done
+            while ! oc wait -n instana-core pod --for=condition=Ready --all 2>/dev/null; do sleep 30; done
     - name: verify-units-pods
       taskRef:
         kind: Task
@@ -1022,15 +1034,7 @@ spec:
       params:
         - name: SCRIPT
           value: |
-            while true
-            do
-              RESULT=$(oc wait -n instana-units pod --for=condition=Ready --all)
-              if [$? -eq 0]; then
-                echo "All pods Ready."
-                break
-              fi
-              sleep 10
-            done
+            while ! oc wait -n instana-units pod --for=condition=Ready --all 2>/dev/null; do sleep 30; done
     - name: create-routes
       taskRef:
         kind: Task
