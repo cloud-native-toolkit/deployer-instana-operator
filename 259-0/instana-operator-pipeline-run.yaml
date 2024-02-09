@@ -1,9 +1,10 @@
-apiVersion: tekton.dev/v1beta1
+apiVersion: tekton.dev/v1
 kind: PipelineRun
 metadata:
   generateName: instana-operator-run-
 spec:
-  timeout: 6h0m0s
+  timeouts:
+    pipeline: 6h0m0s
   pipelineRef:
     name: instana-operator
   params:
