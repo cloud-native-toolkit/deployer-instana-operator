@@ -73,11 +73,11 @@ spec:
         - name: SCRIPT
           value: |
             instana_route=$(oc get route unit0-tenant0-ui -n instana-core --template='{{ .spec.host }}')
-            echo "Console Route: $instana_route"
+            echo "Console Route: https://$instana_route"
             echo "Username: $(params.user-valid-email)"
             echo "Password: $(params.instana-password)"
 
-            oc patch configmap/pipeline-output -p "{\"data\":{\"Status\":\"Pipeline run Successful\",\"Instana-Console-Route\":\"${instana_route}\",\"Instana-Initial-Admin-Username\":\"$(params.user-valid-email)\",\"Instana-Initial-Admin-Password\":\"$(params.instana-password)\"}}"
+            oc patch configmap/pipeline-output -p "{\"data\":{\"Status\":\"Pipeline run Successful\",\"Instana-Console-Route\":\"https://${instana_route}\",\"Instana-Initial-Admin-Username\":\"$(params.user-valid-email)\",\"Instana-Initial-Admin-Password\":\"$(params.instana-password)\"}}"
   tasks:
     - name: add-namespace
       retries: 3
@@ -785,7 +785,7 @@ spec:
                 --docker-password=$(params.agent-key) \
                 --docker-server=artifact-public.instana.io --dry-run=client -o yaml | kubectl apply -f -
 
-              FQDN=$(kubectl get route console -n openshift-console | sed -n 's/.*console-openshift-console\.apps\.\(.*\.com\).*/\1/p')
+              FQDN=$(kubectl get ingresscontroller default -n openshift-ingress-operator -o go-template='{{.status.domain}}')
               printf "$FQDN" | tee $(results.fqdn.path)
               echo $FQDN
 
@@ -809,7 +809,7 @@ spec:
               # Create the key
               openssl genrsa -aes128 -passout pass:nopass -out key.pem 2048
               # Create the certificate
-              openssl req -new -x509 -passin pass:nopass -key key.pem -out cert.pem -days 365 -subj "/C=US/ST=Texas/L=Dallas/O=IBM/OU=Techzone/CN=instana.apps.$FQDN"
+              openssl req -new -x509 -passin pass:nopass -key key.pem -out cert.pem -days 365 -subj "/C=US/ST=Texas/L=Dallas/O=IBM/OU=Techzone/CN=instana.apps" -addext "subjectAltName = DNS:$FQDN"
               # Combine the two into a single file
               cat key.pem cert.pem > sp.pem
               COMBINEDKEY=$(sed -e 's/^/    /' sp.pem)
@@ -892,6 +892,11 @@ spec:
                 namespace: instana-core
                 name: instana-core
               spec:
+                componentConfigs:
+                  - name: gateway
+                    properties:
+                      - name: nginx.http.server_names_hash_bucket_size
+                        value: "256"
                 # The domain under which Instana is reachable
                 baseDomain: instana.apps.$FQDN
 
