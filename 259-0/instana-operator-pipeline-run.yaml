@@ -17,7 +17,7 @@ spec:
     - name: storage-class
       value: "ocs-storagecluster-cephfs"
     - name: ocp-client-version
-      value: "4.12"
+      value: "4.14"
     # - name: agent-key
     #   value: "<your-agent-key>"
     # - name: sales-key
@@ -26,6 +26,7 @@ spec:
       value: "false"
     - name: docker-access-token
       value: "false"
-  podTemplate:
-    securityContext:
-      fsGroup: 65532
+  taskRunTemplate:
+    podTemplate:
+      securityContext:
+        fsGroup: 65532
