@@ -789,7 +789,18 @@ spec:
               printf "$FQDN" | tee $(results.fqdn.path)
               echo $FQDN
 
-              openssl req -x509 -newkey rsa:2048 -keyout tls.key -out tls.crt -days 365 -nodes -subj "/CN=instana.apps.$FQDN"
+              kubectl instana license download --sales-key $(params.sales-key)
+              LICENSE=$(cat license.json)
+
+              # generate Diffie-Hellman parameters
+              openssl dhparam -out dhparams.pem 2048
+              DHPARAMS=$(sed -e 's/^/  /' dhparams.pem)
+              # Create the certificate and key
+              openssl req -x509 -newkey rsa:2048 -keyout tls.key -out tls.crt -days 365 -nodes -subj "/C=US/ST=Texas/L=Dallas/O=IBM/OU=Techzone/CN=instana.apps" -addext "subjectAltName = DNS:$FQDN"
+
+              # Combine the two into a single file
+              cat tls.key tls.crt > sp.pem
+              COMBINEDKEY=$(sed -e 's/^/    /' sp.pem)
 
               kubectl create secret tls instana-tls --namespace instana-core \
                 --cert=tls.crt --key=tls.key  --dry-run=client -o yaml | kubectl apply -f -
@@ -799,20 +810,6 @@ spec:
                 --docker-username=_ \
                 --docker-password=$(params.agent-key) \
                 --docker-server=artifact-public.instana.io --dry-run=client -o yaml | kubectl apply -f -
-
-              kubectl instana license download --sales-key $(params.sales-key)
-              LICENSE=$(cat license.json)
-
-              # generate Diffie-Hellman parameters
-              openssl dhparam -out dhparams.pem 2048
-              DHPARAMS=$(sed -e 's/^/  /' dhparams.pem)
-              # Create the key
-              openssl genrsa -aes128 -passout pass:nopass -out key.pem 2048
-              # Create the certificate
-              openssl req -new -x509 -passin pass:nopass -key key.pem -out cert.pem -days 365 -subj "/C=US/ST=Texas/L=Dallas/O=IBM/OU=Techzone/CN=instana.apps" -addext "subjectAltName = DNS:$FQDN"
-              # Combine the two into a single file
-              cat key.pem cert.pem > sp.pem
-              COMBINEDKEY=$(sed -e 's/^/    /' sp.pem)
 
               cat <<EOT >> /tmp/config.yaml
               # Diffie-Hellman parameters to use
@@ -1022,7 +1019,7 @@ spec:
               kubectl apply -f /tmp/unit.yaml
       runAfter:
         - install-instana-operator-and-datastores
-      retries: 3
+      #retries: 3
     - name: verify-core-pods
       taskRef:
         kind: Task
